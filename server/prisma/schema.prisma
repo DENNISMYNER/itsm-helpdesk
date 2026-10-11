@@ -1,0 +1,203 @@
+// ITSM data model.
+//
+// Conventions
+//  - All timestamps are timestamptz(3) so every environment agrees on instants.
+//  - Indexes are designed around the real query paths (see comments per model).
+//  - The status state machine and audit-log immutability are additionally enforced
+//    by PostgreSQL triggers (see migrations/*_db_guards/migration.sql).
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  CUSTOMER
+  AGENT
+  ADMIN
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING_ON_CUSTOMER
+  RESOLVED
+  CLOSED
+}
+
+// Declaration order matters: PostgreSQL sorts enums by position,
+// so `ORDER BY priority DESC` yields CRITICAL first.
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum TicketCategory {
+  HARDWARE
+  SOFTWARE
+  NETWORK
+  ACCESS
+  EMAIL
+  SECURITY
+  OTHER
+}
+
+enum AuditAction {
+  TICKET_CREATED
+  STATUS_CHANGED
+  ASSIGNED
+  REASSIGNED
+  UNASSIGNED
+  PRIORITY_CHANGED
+  NOTE_ADDED
+}
+
+enum NotificationType {
+  TICKET_ASSIGNED
+  STATUS_CHANGED
+  NEW_MESSAGE
+}
+
+model User {
+  id             String           @id @default(cuid())
+  email          String           @unique
+  name           String
+  passwordHash   String
+  role           Role             @default(CUSTOMER)
+  isActive       Boolean          @default(true)
+  /// Categories an agent specialises in; drives automated routing.
+  skills         TicketCategory[]
+  /// Last time a ticket was routed to this agent; powers round-robin fairness.
+  lastAssignedAt DateTime?        @db.Timestamptz(3)
+  createdAt      DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime         @updatedAt @db.Timestamptz(3)
+
+  requestedTickets Ticket[]        @relation("TicketRequester")
+  assignedTickets  Ticket[]        @relation("TicketAssignee")
+  messages         TicketMessage[]
+  auditLogs        AuditLog[]
+  notifications    Notification[]
+
+  // Candidate lookup for routing: active agents by role.
+  @@index([role, isActive])
+  @@map("users")
+}
+
+model Ticket {
+  id              String         @id @default(cuid())
+  /// Human-friendly sequential reference (displayed as ITSM-<number>).
+  number          Int            @unique @default(autoincrement())
+  title           String         @db.VarChar(200)
+  description     String         @db.Text
+  status          TicketStatus   @default(OPEN)
+  priority        TicketPriority @default(MEDIUM)
+  category        TicketCategory @default(OTHER)
+  requesterId     String
+  assigneeId      String?
+  slaDueAt        DateTime       @db.Timestamptz(3)
+  firstResponseAt DateTime?      @db.Timestamptz(3)
+  resolvedAt      DateTime?      @db.Timestamptz(3)
+  closedAt        DateTime?      @db.Timestamptz(3)
+  createdAt       DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime       @updatedAt @db.Timestamptz(3)
+
+  requester     User            @relation("TicketRequester", fields: [requesterId], references: [id], onDelete: Restrict)
+  assignee      User?           @relation("TicketAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  messages      TicketMessage[]
+  auditLogs     AuditLog[]
+  notifications Notification[]
+
+  // Staff queue: filter by status, sort by priority then age.
+  @@index([status, priority, createdAt(sort: Desc)])
+  // "My queue" for an agent.
+  @@index([assigneeId, status, updatedAt(sort: Desc)])
+  // "My tickets" for a customer.
+  @@index([requesterId, createdAt(sort: Desc)])
+  // Category breakdowns and category-filtered queues.
+  @@index([category, status])
+  // Volume-over-time reporting.
+  @@index([createdAt])
+  // Resolution-time reporting.
+  @@index([resolvedAt])
+  // SLA overdue scans over active tickets.
+  @@index([status, slaDueAt])
+  @@map("tickets")
+}
+
+model TicketMessage {
+  id         String   @id @default(cuid())
+  ticketId   String
+  authorId   String
+  body       String   @db.Text
+  /// Internal notes are visible to staff only.
+  isInternal Boolean  @default(false)
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author User   @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+  // Conversation rendering: all messages of a ticket in order.
+  @@index([ticketId, createdAt])
+  @@map("ticket_messages")
+}
+
+/// Append-only activity stream. UPDATE / DELETE / TRUNCATE are rejected by a trigger.
+model AuditLog {
+  id        String      @id @default(cuid())
+  ticketId  String
+  /// Null when the system itself performed the action.
+  actorId   String?
+  action    AuditAction
+  fromValue String?
+  toValue   String?
+  metadata  Json?
+  createdAt DateTime    @default(now()) @db.Timestamptz(3)
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Restrict)
+  actor  User?  @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  // Per-ticket timeline.
+  @@index([ticketId, createdAt])
+  // Global stream, newest first.
+  @@index([createdAt])
+  // "What did this person do?"
+  @@index([actorId, createdAt])
+  // Filtering the global stream by action.
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  ticketId  String?
+  type      NotificationType
+  title     String
+  body      String?
+  readAt    DateTime?        @db.Timestamptz(3)
+  createdAt DateTime         @default(now()) @db.Timestamptz(3)
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ticket Ticket? @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  // Inbox listing and unread counts.
+  @@index([userId, readAt, createdAt(sort: Desc)])
+  @@map("notifications")
+}
+
+/// Lookup table of legal status transitions, consulted by a database trigger.
+/// Kept in sync with the application state machine (verified at server start-up).
+model StatusTransition {
+  fromStatus TicketStatus
+  toStatus   TicketStatus
+
+  @@id([fromStatus, toStatus])
+  @@map("ticket_status_transitions")
+}

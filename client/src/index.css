@@ -1,0 +1,177 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/public-sans';
+
+/*
+ * Design tokens
+ * -------------
+ * Every colour is a semantic CSS variable, defined once for light and once for dark.
+ * Components use the Tailwind utilities generated from `@theme inline` below
+ * (bg-panel, text-muted, border-line ...) and never need `dark:` variants.
+ *
+ * Priority and status colours carry meaning, so each one always ships with an icon or a
+ * text label as well (never colour alone). Chart colours were checked with a colour-blind
+ * simulation: blue/amber stay distinguishable in both themes.
+ */
+:root {
+  color-scheme: light;
+
+  --canvas: #f3f5f7;
+  --panel: #ffffff;
+  --subtle: #eef1f4;
+  --ink: #162029;
+  --muted: #55626d;
+  --faint: #8793a0;
+  --line: #dce2e8;
+  --line-strong: #c5ced6;
+
+  --brand: #0e5a8a;
+  --brand-hover: #0b4a71;
+  --brand-ink: #ffffff;
+  --brand-soft: #e3eff7;
+  --focus: #0e5a8a;
+
+  --danger: #b42318;
+  --danger-soft: #fdecea;
+  --success: #1b7f4b;
+  --success-soft: #e3f4ea;
+
+  --prio-critical: #b42318;
+  --prio-high: #c2570c;
+  --prio-medium: #9a7400;
+  --prio-low: #6b7885;
+
+  --st-open: #175cd3;
+  --st-open-soft: #e5eefc;
+  --st-progress: #6941c6;
+  --st-progress-soft: #efe9fb;
+  --st-waiting: #0e7c86;
+  --st-waiting-soft: #dff3f4;
+  --st-resolved: #1b7f4b;
+  --st-resolved-soft: #e3f4ea;
+  --st-closed: #55626d;
+  --st-closed-soft: #eef1f4;
+
+  --chart-a: #0e5a8a;
+  --chart-b: #b45309;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --canvas: #0f161c;
+    --panel: #161f27;
+    --subtle: #1c2731;
+    --ink: #e6ecf1;
+    --muted: #9ba9b5;
+    --faint: #6d7c88;
+    --line: #27333d;
+    --line-strong: #364552;
+
+    --brand: #4aa3e0;
+    --brand-hover: #6bb6ea;
+    --brand-ink: #08202f;
+    --brand-soft: #14293a;
+    --focus: #6bb6ea;
+
+    --danger: #f08a80;
+    --danger-soft: #3a1d1b;
+    --success: #5fd09a;
+    --success-soft: #153326;
+
+    --prio-critical: #f08a80;
+    --prio-high: #f0a35e;
+    --prio-medium: #e0b84a;
+    --prio-low: #93a1ad;
+
+    --st-open: #7aa9f5;
+    --st-open-soft: #172a4a;
+    --st-progress: #b69cf0;
+    --st-progress-soft: #2a2145;
+    --st-waiting: #5cc7d1;
+    --st-waiting-soft: #123539;
+    --st-resolved: #5fd09a;
+    --st-resolved-soft: #153326;
+    --st-closed: #9ba9b5;
+    --st-closed-soft: #1c2731;
+
+    --chart-a: #3f93d4;
+    --chart-b: #b8791f;
+  }
+}
+
+@theme inline {
+  --font-sans: 'Public Sans Variable', ui-sans-serif, system-ui, sans-serif;
+
+  --color-canvas: var(--canvas);
+  --color-panel: var(--panel);
+  --color-subtle: var(--subtle);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-brand: var(--brand);
+  --color-brand-hover: var(--brand-hover);
+  --color-brand-ink: var(--brand-ink);
+  --color-brand-soft: var(--brand-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-chart-a: var(--chart-a);
+  --color-chart-b: var(--chart-b);
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 0.9375rem;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* Visible keyboard focus everywhere, invisible for mouse users. */
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  ::selection {
+    background: var(--brand-soft);
+  }
+}
+
+@layer utilities {
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+  /* Used by the live-update highlight on rows that just changed. */
+  .flash-once {
+    animation: flash 1.6s ease-out 1;
+  }
+}
+
+@keyframes flash {
+  from {
+    background-color: var(--brand-soft);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
