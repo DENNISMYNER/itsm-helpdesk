@@ -1,420 +1,707 @@
 # ITSM Helpdesk
 
-An IT helpdesk and customer-support ticketing system. Customers raise requests and chat with support in real time; agents work a prioritised queue with automatic routing, SLA tracking and a live analytics dashboard; admins manage the team and review a permanent audit trail.
+A full-stack IT helpdesk and customer-support ticketing system built with React, TypeScript, Node.js, Express, and PostgreSQL.
 
-## Contents
+Customers can submit support requests and chat with support staff in real time. Agents manage a prioritised ticket queue with automated assignment and SLA tracking, while administrators oversee users, system activity, and analytics.
+
+## Screenshots
+
+### Signup
+
+![ITSM Helpdesk Signup](docs/screenshots/signup.png)
+
+### Customer Dashboard
+
+![Customer Dashboard](docs/screenshots/customer-dashboard.png)
+
+### Agent Dashboard
+
+![Agent Dashboard](docs/screenshots/agent-dashboard.png)
+
+### Admin Dashboard
+
+![Admin Dashboard](docs/screenshots/admin-dashboard.png)
+
+## Table of Contents
 
 - [Features](#features)
 - [Technologies](#technologies)
 - [Architecture](#architecture)
-- [Project structure](#project-structure)
-- [Local setup](#local-setup)
-- [Demo accounts](#demo-accounts)
-- [Scripts](#scripts)
+- [Project Structure](#project-structure)
+- [Local Setup](#local-setup)
+- [Demo Accounts](#demo-accounts)
+- [Available Scripts](#available-scripts)
 - [Testing](#testing)
-- [API reference](#api-reference)
-- [Real-time events](#real-time-events)
+- [API Reference](#api-reference)
+- [Real-Time Events](#real-time-events)
 - [Configuration](#configuration)
 - [Deployment](#deployment)
-- [Design decisions and next steps](#design-decisions-and-next-steps)
+- [Design Decisions and Future Improvements](#design-decisions-and-future-improvements)
 - [Troubleshooting](#troubleshooting)
+- [License](#license)
 
 ## Features
 
-| Area                        | What it does                                                                                                                                                                                                                         |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Status state machine**    | `OPEN → IN_PROGRESS → WAITING_ON_CUSTOMER → RESOLVED → CLOSED`, plus the two legal loops (work resumes after waiting; a resolved ticket can be reopened). `CLOSED` is terminal. Enforced in the API **and** by a PostgreSQL trigger. |
-| **Automated routing**       | A rule engine assigns each new ticket by category and priority using _least-active_ (priority-weighted workload) or _round-robin_ selection, preferring agents whose skills match.                                                   |
-| **Real-time collaboration** | Socket.io powers live chat, typing indicators, notifications and instant queue/dashboard updates.                                                                                                                                    |
-| **Analytics**               | Average resolution time, first-response time, SLA compliance, ticket volume per day, status/priority/category breakdowns and per-agent results, computed in SQL on indexed columns.                                                  |
-| **Audit log**               | Every ticket creation, status change, assignment, priority change and internal note is recorded. The table is append-only: database triggers reject `UPDATE`, `DELETE` and `TRUNCATE`.                                               |
-| **Priorities and SLA**      | `LOW / MEDIUM / HIGH / CRITICAL` with resolution targets of 72 h / 24 h / 8 h / 4 h. Keyword rules escalate obvious emergencies (for example a suspected phishing attack).                                                           |
-| **Roles**                   | Customers see only their own tickets; agents work the queue; admins also manage users and see the global audit stream. Internal notes never reach customers.                                                                         |
-| **Notifications**           | In-app notifications for assignments, status changes and new messages, delivered live and kept in an inbox.                                                                                                                          |
+| Area                            | Description                                                                                                                                                                |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Ticket Management**           | Create, assign, prioritise, track, resolve, close, and reopen support tickets through a controlled status workflow.                                                        |
+| **Status State Machine**        | Enforces legal transitions between `OPEN`, `IN_PROGRESS`, `WAITING_ON_CUSTOMER`, `RESOLVED`, and `CLOSED`. The `CLOSED` state is terminal.                                 |
+| **Automated Ticket Routing**    | Assigns tickets using category, priority, agent skills, and workload. Supports least-active and round-robin strategies.                                                    |
+| **Real-Time Collaboration**     | Socket.IO powers live messaging, typing indicators, notifications, and immediate ticket queue and dashboard updates.                                                       |
+| **Analytics Dashboard**         | Tracks average resolution time, first-response time, SLA compliance, ticket volume, status, priority, category, and agent performance.                                     |
+| **Audit Trail**                 | Records ticket creation, status changes, assignments, priority changes, and internal notes. Database triggers prevent updates, deletions, and truncation of audit records. |
+| **Priority and SLA Management** | Supports `LOW`, `MEDIUM`, `HIGH`, and `CRITICAL` priorities with resolution targets of 72, 24, 8, and 4 hours, respectively.                                               |
+| **Role-Based Access Control**   | Customers access their own tickets, agents manage support queues, and administrators manage users and access the global audit stream.                                      |
+| **Internal Notes**              | Staff can exchange internal notes that remain hidden from customers.                                                                                                       |
+| **Notifications**               | Provides an in-app notification inbox for assignments, ticket status changes, and new messages.                                                                            |
+| **Authentication and Security** | Uses password hashing, HTTP-only session cookies, input validation, rate limiting, and role-based permissions.                                                             |
+| **Database Integrity**          | Uses PostgreSQL constraints, foreign keys, indexes, and triggers to enforce important data rules at database level.                                                        |
 
 ## Technologies
 
-| Layer    | Stack                                                                                                                      |
-| -------- | -------------------------------------------------------------------------------------------------------------------------- |
-| Frontend | React 19, TypeScript, Vite, React Router, TanStack Query, Tailwind CSS v4, Lucide React icons                              |
-| Backend  | Node.js, Express 5, Socket.io, Zod (validation), Pino (logging), Helmet, express-rate-limit                                |
-| Database | PostgreSQL with Prisma ORM (compound indexes, raw SQL for reporting, SQL triggers for guarantees)                          |
-| Auth     | Password hashing with bcrypt; session token in an `httpOnly`, `SameSite=Lax` cookie (also used to authenticate WebSockets) |
-| Testing  | Vitest (unit and integration against a real PostgreSQL)                                                                    |
-| Tooling  | npm workspaces, Docker Compose for local PostgreSQL                                                                        |
+| Layer             | Technologies                                                                            |
+| ----------------- | --------------------------------------------------------------------------------------- |
+| Frontend          | React 19, TypeScript, Vite, React Router, TanStack Query, Tailwind CSS v4, Lucide React |
+| Backend           | Node.js, Express 5, Socket.IO, Zod, Pino, Helmet, express-rate-limit                    |
+| Database          | PostgreSQL, Prisma ORM                                                                  |
+| Authentication    | bcrypt password hashing, JWT-signed session tokens, HTTP-only cookies                   |
+| Testing           | Vitest, unit tests, integration tests against PostgreSQL                                |
+| Development Tools | npm workspaces, Docker Compose, TypeScript                                              |
 
 ## Architecture
 
 The application separates the frontend, backend, and database into distinct layers.
 
 ```text
-┌────────────────────────────── Browser ──────────────────────────────┐
-│  React app  ──  TanStack Query cache  ◄──── live invalidation ◄──┐  │
-│     │ REST (cookie session)                                       │  │
-└─────┼─────────────────────────────────────────────────────────────┼──┘
-      │ /api/*                                          /socket.io  │
-┌─────▼─────────────────────────────────────────────────────────────┼──┐
-│  Express                                                          │  │
-│   middleware: helmet · cors · rate-limit · auth · error handler   │  │
-│   routes ─► controller (parse + validate) ─► service (rules)      │  │
-│                                   │                               │  │
-│                  one DB transaction per command                   │  │
-│          (state machine · routing · audit · notifications)        │  │
-│                                   │ after COMMIT                  │  │
-│                         domain event bus ──► Socket.io gateway ───┘  │
-└───────────────────────────────────┬──────────────────────────────────┘
-                                    │ Prisma (pg driver adapter)
-                       ┌────────────▼─────────────┐
-                       │       PostgreSQL         │
-                       │ indexes · triggers · FKs │
-                       └──────────────────────────┘
+┌───────────────────────────────┐
+│          Frontend             │
+│                               │
+│ React + TypeScript + Vite     │
+│ TanStack Query                │
+│ React Router                  │
+└───────────────┬───────────────┘
+                │
+         REST API + Socket.IO
+                │
+┌───────────────▼───────────────┐
+│           Backend             │
+│                               │
+│ Node.js + Express             │
+│ Authentication and Validation│
+│ Controllers and Services      │
+│ Ticket Routing and SLA Rules  │
+│ Audit Logging and Events      │
+└───────────────┬───────────────┘
+                │
+             Prisma ORM
+                │
+┌───────────────▼───────────────┐
+│          PostgreSQL           │
+│                               │
+│ Tables and Relationships      │
+│ Indexes and Constraints       │
+│ Database Triggers             │
+└───────────────────────────────┘
 ```
 
-### Request lifecycle
+### Request Lifecycle
 
-1. **Route → controller.** Controllers parse input with Zod and call a service. They contain no business rules.
-2. **Service → command runner.** Every change to a ticket runs inside one database transaction (`runCommand`). The transition, the audit entry and the notifications commit together or not at all.
-3. **After commit → events.** Services queue _domain events_ while the transaction runs. They are published only after `COMMIT`, so clients never hear about a change that was rolled back.
-4. **Gateway.** The Socket.io gateway is the only code that knows about sockets. It subscribes to the event bus and pushes updates to the right rooms.
+1. **Route and controller:** Routes direct requests to controllers, which validate incoming data using Zod.
+2. **Service layer:** Services execute business rules, including ticket transitions, assignment, SLA calculations, and permissions.
+3. **Database transaction:** Each ticket command performs related database changes in a transaction. Ticket updates, audit entries, and notifications are committed together.
+4. **Event publication:** Domain events are published after the transaction commits, preventing clients from receiving updates for rolled-back changes.
+5. **Real-time delivery:** The Socket.IO gateway sends events to authorised users and rooms. The frontend updates its cached data through TanStack Query.
 
-### Status state machine (two layers)
+### Ticket Status State Machine
 
-- **API layer** (`ticket.state-machine.ts`): the table of legal edges and which roles may use them. It produces friendly errors: `422 INVALID_STATUS_TRANSITION` for an edge that does not exist and `403` for an edge the role may not use. Customers may only confirm (`CLOSED`) or reopen (`IN_PROGRESS`) a resolved ticket.
-- **Database layer** (migration `db_guards`): a `BEFORE INSERT OR UPDATE OF status` trigger consults the `ticket_status_transitions` table, and `CHECK` constraints keep `resolvedAt` / `closedAt` consistent with the status. Even a manual SQL statement cannot skip a stage.
-- **Drift protection:** on start-up the server compares both copies and refuses to boot if they disagree. Updates are also conditional on the status that was read, so two agents racing on one ticket cannot both win (`409 STALE_TICKET`).
+The permitted ticket statuses are:
 
-### Automated routing
+`OPEN → IN_PROGRESS → WAITING_ON_CUSTOMER → RESOLVED → CLOSED`
 
-`routing.engine.ts` is pure logic (no database, clock or environment), so every branch is unit-tested. Rules are evaluated in order; the first match wins:
+The system also supports these legal transitions:
 
-| Rule                     | When                              | Selection                                  |
-| ------------------------ | --------------------------------- | ------------------------------------------ |
-| `critical-least-active`  | priority is `CRITICAL`            | least-loaded skilled agent                 |
-| `security-least-active`  | category is `SECURITY`            | least-loaded security specialist           |
-| `specialist-round-robin` | any other category except `OTHER` | rotate fairly between matching specialists |
-| `default`                | everything else                   | the configured `ASSIGNMENT_STRATEGY`       |
+- `WAITING_ON_CUSTOMER → IN_PROGRESS`
+- `RESOLVED → IN_PROGRESS` when a ticket is reopened.
 
-_Workload_ is priority-weighted (`LOW 1`, `MEDIUM 2`, `HIGH 3`, `CRITICAL 5` per active ticket). If a rule wants a specialist and none exists, the pool falls back to all agents so tickets never sit unrouted. An advisory lock serialises concurrent ticket creation so two requests cannot read the same workload and pick the same agent. The automated assignment is recorded in the audit log with the rule that decided it.
+The state machine is enforced at two levels:
 
-### Analytics and indexing
+- **Application layer:** Defines permitted transitions and role permissions in `ticket.state-machine.ts`.
+- **Database layer:** Uses a transition table, PostgreSQL triggers, and constraints to protect data integrity.
 
-Aggregations run in PostgreSQL, not in Node. The compound indexes in `schema.prisma` map to real query paths:
+Invalid transitions return a suitable error. Conditional updates also help prevent conflicting changes when multiple agents act on the same ticket.
 
-| Index                                            | Serves                                                       |
-| ------------------------------------------------ | ------------------------------------------------------------ |
-| `tickets (status, priority, createdAt DESC)`     | staff queue filtered by status, sorted by urgency            |
-| `tickets (assigneeId, status, updatedAt DESC)`   | "my queue" and per-agent workload                            |
-| `tickets (requesterId, createdAt DESC)`          | "my tickets" for customers                                   |
-| `tickets (category, status)`                     | category filters and breakdowns                              |
-| `tickets (createdAt)` / `tickets (resolvedAt)`   | volume-over-time and resolution-time range scans             |
-| `tickets (status, slaDueAt)`                     | overdue (SLA) scans over active tickets                      |
-| `audit_logs (ticketId, createdAt)` and others    | per-ticket timeline, global stream, actor and action filters |
-| `notifications (userId, readAt, createdAt DESC)` | inbox and unread counts                                      |
+### Automated Ticket Routing
 
-### Real-time rooms and privacy
+The routing engine assigns tickets according to ordered rules.
 
-Rooms are the authorisation boundary of the real-time layer. A socket only receives what is emitted to rooms it was allowed to join:
+| Rule                     | Condition                  | Assignment Strategy                     |
+| ------------------------ | -------------------------- | --------------------------------------- |
+| `critical-least-active`  | Priority is `CRITICAL`     | Least-loaded agent with matching skills |
+| `security-least-active`  | Category is `SECURITY`     | Least-loaded security specialist        |
+| `specialist-round-robin` | Another supported category | Rotate between matching specialists     |
+| `default`                | No earlier rule matches    | Use the configured assignment strategy  |
 
-- `staff` — every agent and admin (live queue and dashboard)
-- `user:<id>` — one person's private channel (notifications, "my tickets")
-- `ticket:<id>` — participants of a ticket (public chat)
-- `ticket:<id>:staff` — staff on a ticket (internal notes and audit activity)
+Workload is weighted by ticket priority:
 
-Joining a ticket room re-checks permissions on the server, and internal notes are only ever emitted to the staff room.
+- `LOW`: 1
+- `MEDIUM`: 2
+- `HIGH`: 3
+- `CRITICAL`: 5
 
-### Security notes
+If no suitable specialist is available, the system falls back to the wider agent pool so tickets can still be assigned.
 
-- Session cookie is `httpOnly`, `SameSite=Lax` and `Secure` in production; users are re-read on every request, so deactivation and role changes apply immediately.
-- Login does not reveal whether an email exists, and compares against a dummy hash to keep timing uniform.
-- Every input is validated with Zod; error responses use a stable `{ error: { code, message, details? } }` shape.
-- Rate limiting on the whole API and a stricter limit on sign-in and registration.
-- Ticket ids cannot be probed: another customer's ticket returns `404`, not `403`.
-- Admins cannot demote or deactivate themselves.
-- Secrets come from environment variables; the server refuses to start with a weak `JWT_SECRET`.
+### Analytics and Database Indexing
 
-## Project structure
+Analytics are calculated in PostgreSQL using SQL queries rather than loading large datasets into Node.js.
+
+Important indexes support:
+
+- Staff queues filtered by status and priority.
+- Agent workload and assigned-ticket views.
+- Customer ticket history.
+- Category-based filtering and reporting.
+- Ticket volume and resolution-time calculations.
+- SLA deadline checks.
+- Audit history and notification inboxes.
+
+### Real-Time Rooms and Privacy
+
+Socket.IO rooms restrict which events users can receive.
+
+| Room                | Purpose                                         |
+| ------------------- | ----------------------------------------------- |
+| `staff`             | Live staff queue and dashboard updates          |
+| `user:<id>`         | Private notifications and user-specific updates |
+| `ticket:<id>`       | Public ticket conversations                     |
+| `ticket:<id>:staff` | Staff-only internal notes and audit activity    |
+
+The server checks permissions before allowing a user to join a ticket room. Internal notes are sent only to authorised staff.
+
+### Security
+
+The application incorporates several security measures:
+
+- HTTP-only session cookies with `SameSite=Lax` and `Secure` in production.
+- Password hashing using bcrypt.
+- Zod validation for incoming data.
+- Rate limiting across the API, with stricter limits for authentication endpoints.
+- Role-based access control for customers, agents, and administrators.
+- Generic login errors that avoid revealing whether an email address exists.
+- Consistent API error responses.
+- Ticket access restrictions that avoid revealing whether another customer's ticket exists.
+- Environment-based configuration for secrets and database credentials.
+- Protection against unauthorised changes to ticket status and audit records.
+
+## Project Structure
 
 ```text
 itsm-helpdesk/
-├── docker-compose.yml          # local PostgreSQL
-├── package.json                # npm workspaces + root scripts
-├── scripts/package.sh          # builds a clean zip of the project
+├── docker-compose.yml
+├── package.json
+├── package-lock.json
+├── README.md
+├── scripts/
+│   └── package.sh
+├── docs/
+│   └── screenshots/
+│       ├── signup.png
+│       ├── customer-dashboard.png
+│       ├── agent-dashboard.png
+│       └── admin-dashboard.png
 ├── server/
 │   ├── prisma/
-│   │   ├── schema.prisma       # data model + compound indexes
-│   │   ├── migrations/         # init + db_guards (triggers, constraints)
-│   │   └── seed.ts             # demo users and ~54 tickets
+│   │   ├── schema.prisma
+│   │   ├── migrations/
+│   │   └── seed.ts
 │   ├── src/
-│   │   ├── config/             # validated environment
-│   │   ├── domain/             # enums shared by all layers (no persistence imports)
-│   │   ├── events/             # domain events + in-process event bus
-│   │   ├── lib/                # errors, tokens, password, pagination, Prisma client
-│   │   ├── middleware/         # auth, errors, rate limiting
+│   │   ├── config/
+│   │   ├── domain/
+│   │   ├── events/
+│   │   ├── lib/
+│   │   ├── middleware/
 │   │   ├── modules/
-│   │   │   ├── auth/  users/  notifications/  audit/  analytics/  health/
-│   │   │   ├── messages/       # chat + internal notes
-│   │   │   ├── routing/        # rule engine, escalation, workload loading
-│   │   │   └── tickets/        # state machine, commands, queries, SLA
-│   │   ├── realtime/           # Socket.io server, auth, rooms, event forwarder
-│   │   ├── routes/             # mounts every module under /api
-│   │   ├── app.ts              # Express app (testable without listening)
-│   │   └── server.ts           # start-up, graceful shutdown
+│   │   │   ├── auth/
+│   │   │   ├── users/
+│   │   │   ├── notifications/
+│   │   │   ├── audit/
+│   │   │   ├── analytics/
+│   │   │   ├── health/
+│   │   │   ├── messages/
+│   │   │   ├── routing/
+│   │   │   └── tickets/
+│   │   ├── realtime/
+│   │   ├── routes/
+│   │   ├── app.ts
+│   │   └── server.ts
 │   └── tests/
-│       ├── unit/               # state machine, routing, SLA, error mapping
-│       └── integration/        # DB triggers + full API flow (real PostgreSQL)
+│       ├── unit/
+│       └── integration/
 └── client/
     └── src/
-        ├── api/                # typed endpoint functions
-        ├── components/         # ui/ · layout/ · tickets/ · analytics/
-        ├── context/            # auth, socket, toasts, live sync
-        ├── hooks/              # data hooks, ticket room, live sync, debounce
-        ├── lib/                # formatting, labels, query keys, filters
-        ├── pages/              # one file per screen
-        └── types/              # API response types
+        ├── api/
+        ├── components/
+        ├── context/
+        ├── hooks/
+        ├── lib/
+        ├── pages/
+        └── types/
 ```
 
-Each backend module follows the same shape: `*.routes.ts` → `*.controller.ts` → `*.service.ts`, with `*.schemas.ts` (Zod) and `*.selects.ts` (Prisma selects and DTO types) alongside.
+### Key Directories
 
-## Local setup
+| Path                     | Purpose                                                                                  |
+| ------------------------ | ---------------------------------------------------------------------------------------- |
+| `client/src/api/`        | Typed API functions for communicating with the backend                                   |
+| `client/src/components/` | Reusable UI components, layouts, ticket components, and analytics components             |
+| `client/src/context/`    | Authentication, Socket.IO, notifications, and live synchronisation                       |
+| `client/src/hooks/`      | Data fetching, ticket rooms, live updates, and reusable hooks                            |
+| `client/src/pages/`      | Application screens                                                                      |
+| `client/src/types/`      | TypeScript types for API responses                                                       |
+| `server/prisma/`         | Database schema, migrations, and seed data                                               |
+| `server/src/config/`     | Environment configuration and validation                                                 |
+| `server/src/domain/`     | Shared domain rules and enums                                                            |
+| `server/src/events/`     | Domain events and event bus                                                              |
+| `server/src/middleware/` | Authentication, error handling, and rate limiting                                        |
+| `server/src/modules/`    | Authentication, tickets, users, routing, analytics, messaging, and other backend modules |
+| `server/src/realtime/`   | Socket.IO authentication, rooms, and event forwarding                                    |
+| `server/tests/`          | Unit and integration tests                                                               |
+| `docs/screenshots/`      | Screenshots displayed in this README                                                     |
+
+Backend modules generally follow a consistent structure:
+
+`routes → controller → service`
+
+Validation schemas and database selection/DTO definitions are maintained alongside the relevant module.
+
+## Local Setup
 
 ### Prerequisites
 
-- **Node.js 22.12 or newer** and npm 10+ (`node -v`)
-- **PostgreSQL 15+**, either through **Docker** (recommended, a compose file is included) or a local installation
-- Git (optional)
+Install the following before running the project:
 
-### 1. Install dependencies
+- **Node.js 22.12 or newer**
+- **npm 10 or newer**
+- **PostgreSQL 15 or newer**, or Docker Desktop with Docker Compose
+- Git, if you want to clone the repository
 
-From the project root:
+### 1. Install Dependencies
+
+Open a terminal in the project root and run:
 
 ```bash
 npm install
 ```
 
-This installs both workspaces and generates the Prisma client automatically.
+This installs the npm workspace dependencies and generates the Prisma client through the configured installation scripts.
 
-### 2. Configure environment variables
+### 2. Configure Environment Variables
 
-```bash
-# macOS / Linux
-cp server/.env.example server/.env
+Create the server environment file.
 
-# Windows (PowerShell)
+**Windows PowerShell:**
+
+```powershell
 Copy-Item server/.env.example server/.env
 ```
 
-Open `server/.env` and set at least `JWT_SECRET`. Generate one with:
+**macOS/Linux:**
 
 ```bash
-npm run dev
+cp server/.env.example server/.env
 ```
 
-The defaults already match the bundled Docker database. See [Configuration](#configuration) for every variable.
+Open `server/.env` and configure the required variables, especially `JWT_SECRET` and `DATABASE_URL`.
+
+Generate a strong session-signing secret with:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
+```
+
+Copy the generated value into `JWT_SECRET`.
 
 ### 3. Start PostgreSQL
 
-With Docker:
+If using Docker Compose:
 
 ```bash
-cd client
+docker compose up -d
 ```
 
-Wait until `docker compose ps` shows the database as _healthy_. If you use your own PostgreSQL instead, create an empty database and put its connection string in `DATABASE_URL`.
-
-### 4. Create the schema and load demo data
+Check the database container:
 
 ```bash
-npm run db:migrate   # applies the migrations (tables, indexes, triggers, constraints)
-npm run db:seed      # demo accounts and sample tickets
+docker compose ps
 ```
 
-Optional check that the live schema matches `schema.prisma`:
+Wait until the database reports that it is healthy.
+
+If you are using a local PostgreSQL installation, create an empty database and configure `DATABASE_URL` accordingly.
+
+### 4. Apply Migrations and Seed Demo Data
+
+Run the following commands from the project root:
 
 ```bash
-cd server && npx prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --exit-code
+npm run db:migrate
+npm run db:seed
 ```
 
-### 5. Run the app
+The migration command creates the database schema and applies the required indexes, triggers, and constraints. The seed command creates demo users and sample tickets.
+
+### 5. Start the Application
 
 ```bash
 npm run dev
 ```
 
-This starts both processes:
+This starts the frontend and backend development servers.
 
-| Service           | URL                                                 |
-| ----------------- | --------------------------------------------------- |
-| Web app (Vite)    | http://localhost:5173                               |
-| API and Socket.io | http://localhost:4000 (health check: `/api/health`) |
+| Service      | URL                                                                  |
+| ------------ | -------------------------------------------------------------------- |
+| Frontend     | [http://localhost:5173](http://localhost:5173)                       |
+| Backend API  | [http://localhost:4000](http://localhost:4000)                       |
+| Health Check | [http://localhost:4000/api/health](http://localhost:4000/api/health) |
 
-In development the web app proxies `/api` and `/socket.io` to the API, so the browser only ever talks to one origin. To run the processes separately, use `npm run dev -w server` and `npm run dev -w client` in two terminals.
+During development, Vite proxies API and Socket.IO requests to the backend.
 
-Sign in with one of the demo accounts below. To see real-time behaviour, sign in as a customer in one browser window and as an agent in another (a private window works), then reply to the same ticket from both.
+To run the frontend and backend separately, open two terminals and run:
 
-## Demo accounts
+**Terminal 1 — Backend**
 
-Created by `npm run db:seed`. The password for every account is the `SEED_PASSWORD` value (default `ChangeMe123!`).
+```bash
+npm run dev -w server
+```
+
+**Terminal 2 — Frontend**
+
+```bash
+npm run dev -w client
+```
+
+Open the frontend URL in your browser and sign in using one of the demo accounts below.
+
+To test real-time collaboration, sign in as a customer in one browser window and as an agent in another, then exchange messages on the same ticket.
+
+## Demo Accounts
+
+The accounts below are created by `npm run db:seed`.
+
+The default password for all seeded accounts is the value of `SEED_PASSWORD`, which defaults to `ChangeMe123!`.
 
 | Role     | Email                     | Skills                   |
 | -------- | ------------------------- | ------------------------ |
-| Admin    | `admin@itsm.dev`          | -                        |
+| Admin    | `admin@itsm.dev`          | —                        |
 | Agent    | `grace.agent@itsm.dev`    | Network, Security        |
 | Agent    | `brian.agent@itsm.dev`    | Hardware, Software       |
 | Agent    | `fatuma.agent@itsm.dev`   | Access, Email            |
 | Agent    | `peter.agent@itsm.dev`    | Software, Network, Other |
-| Customer | `mary.customer@itsm.dev`  | -                        |
-| Customer | `john.customer@itsm.dev`  | -                        |
-| Customer | `lucy.customer@itsm.dev`  | -                        |
-| Customer | `david.customer@itsm.dev` | -                        |
+| Customer | `mary.customer@itsm.dev`  | —                        |
+| Customer | `john.customer@itsm.dev`  | —                        |
+| Customer | `lucy.customer@itsm.dev`  | —                        |
+| Customer | `david.customer@itsm.dev` | —                        |
 
-Change `SEED_PASSWORD` before seeding anything that is reachable from the internet. Seeding is repeatable: users are updated in place and sample tickets are only created when the database has none.
+**Security note:** Change `SEED_PASSWORD` before seeding any environment accessible from the internet. Never use demo credentials for production accounts.
 
-## Scripts
+Seeding is repeatable: existing demo users are updated, and sample tickets are created only when the database has none.
 
-Run from the project root.
+## Available Scripts
 
-| Command                    | Description                                                                  |
-| -------------------------- | ---------------------------------------------------------------------------- |
-| `npm run dev`              | API and web app with hot reload                                              |
-| `npm run build`            | Type-checks and builds the server (`server/dist`) and client (`client/dist`) |
-| `npm run typecheck`        | Strict TypeScript check of both packages                                     |
-| `npm test`                 | Unit tests (no database needed)                                              |
-| `npm run test:integration` | Integration tests against a real PostgreSQL (see below)                      |
-| `npm run db:generate`      | Regenerates the Prisma client                                                |
-| `npm run db:migrate`       | Applies pending migrations (`prisma migrate deploy`)                         |
-| `npm run db:seed`          | Loads the demo data                                                          |
-| `npm run db:reset`         | Drops, re-migrates and re-seeds the database (development only)              |
-| `npm run archive`          | Writes a clean `../itsm-helpdesk.zip` without dependencies or secrets        |
+Run these commands from the project root.
 
-Run `npm run db:migrate:dev -w server` when you change `schema.prisma` and need Prisma to author a new migration.
+| Command                    | Description                                                     |
+| -------------------------- | --------------------------------------------------------------- |
+| `npm run dev`              | Starts the frontend and backend in development mode             |
+| `npm run build`            | Type-checks and builds the server and client                    |
+| `npm run typecheck`        | Checks TypeScript types across both workspaces                  |
+| `npm test`                 | Runs unit tests without requiring a database                    |
+| `npm run test:integration` | Runs integration tests against PostgreSQL                       |
+| `npm run db:generate`      | Regenerates the Prisma client                                   |
+| `npm run db:migrate`       | Applies pending database migrations                             |
+| `npm run db:seed`          | Loads demo accounts and sample tickets                          |
+| `npm run db:reset`         | Resets, migrates, and re-seeds the development database         |
+| `npm run archive`          | Creates a clean project archive without dependencies or secrets |
+
+When changing `schema.prisma` during development, use the configured development migration command:
+
+```bash
+npm run db:migrate:dev -w server
+```
+
+Review the generated migration before applying it to other environments.
 
 ## Testing
 
-**Unit tests** cover the state machine, routing engine, escalation rules, SLA maths and database-error mapping. They need nothing external:
+### Unit Tests
+
+Unit tests cover:
+
+- Ticket status transitions.
+- Automated routing.
+- SLA calculations and escalation rules.
+- Database-error mapping.
+- Other isolated business logic.
+
+Run them with:
 
 ```bash
-cd server
-npm run typecheck
 npm test
 ```
 
-**Integration tests** exercise the real thing: the PostgreSQL triggers and constraints directly through SQL, and the full HTTP API (authentication, roles, routing, state machine, chat privacy, audit trail, analytics).
+These tests do not require PostgreSQL.
 
-They use a **separate, disposable database**. The suite wipes its `public` schema and re-applies the migrations on every run, so never point it at data you care about.
+### Integration Tests
+
+Integration tests exercise the application against a real PostgreSQL database. They cover areas such as:
+
+- Database triggers and constraints.
+- Authentication and permissions.
+- Ticket creation, assignment, and status transitions.
+- Messaging and internal-note privacy.
+- Audit logging.
+- Routing and analytics.
+
+**Important:** Integration tests use a separate, disposable database. The test suite clears its `public` schema and reapplies migrations. Never configure it to use a database containing data you need to keep.
+
+Create the test database once when using the bundled Docker setup:
 
 ```bash
-# create the test database once (Docker setup)
 docker compose exec db psql -U itsm -d postgres -c "CREATE DATABASE itsm_test"
-
-# macOS / Linux
-DATABASE_URL_TEST=postgresql://itsm:itsm_password@localhost:5432/itsm_test npm run test:integration
-
-# Windows (PowerShell)
-$env:DATABASE_URL_TEST="postgresql://itsm:itsm_password@localhost:5432/itsm_test"; npm run test:integration
 ```
 
-Without `DATABASE_URL_TEST` the integration suites skip themselves.
+**Windows PowerShell:**
 
-## API reference
+```powershell
+$env:DATABASE_URL_TEST="postgresql://itsm:itsm_password@localhost:5432/itsm_test"
+npm run test:integration
+```
 
-All endpoints live under `/api`, use JSON and authenticate with the session cookie. Errors look like `{ "error": { "code": "...", "message": "...", "details": ... } }`.
+**macOS/Linux:**
 
-| Method and path                                                | Access         | Description                                                                                                                                                                                                                                 |
-| -------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /health`                                                  | public         | Liveness and database reachability                                                                                                                                                                                                          |
-| `POST /auth/register`                                          | public         | Create a customer account                                                                                                                                                                                                                   |
-| `POST /auth/login`                                             | public         | Sign in (sets the session cookie)                                                                                                                                                                                                           |
-| `POST /auth/logout`                                            | public         | Sign out                                                                                                                                                                                                                                    |
-| `GET /auth/me`                                                 | signed in      | Current user                                                                                                                                                                                                                                |
-| `GET /tickets`                                                 | signed in      | List with filters: `status`, `priority`, `category` (comma-separated), `assignee` (`me`, `unassigned` or a user id), `q`, `sort` (`newest`, `oldest`, `updated`, `priority`), `page`, `pageSize`. Customers only ever see their own tickets |
-| `POST /tickets`                                                | signed in      | Create (routed and escalated automatically)                                                                                                                                                                                                 |
-| `GET /tickets/:id`                                             | owner or staff | Detail with messages and the transitions you may perform                                                                                                                                                                                    |
-| `PATCH /tickets/:id/status`                                    | owner or staff | Change status through the state machine                                                                                                                                                                                                     |
-| `PATCH /tickets/:id/assignee`                                  | staff          | Assign, reassign or unassign                                                                                                                                                                                                                |
-| `PATCH /tickets/:id/priority`                                  | staff          | Change priority (moves the SLA deadline)                                                                                                                                                                                                    |
-| `GET /tickets/:id/activity`                                    | staff          | Audit timeline of one ticket                                                                                                                                                                                                                |
-| `POST /tickets/:id/messages`                                   | owner or staff | Chat message; `isInternal: true` for a staff-only note                                                                                                                                                                                      |
-| `GET /analytics/overview?days=7\|14\|30\|90`                   | staff          | Dashboard metrics                                                                                                                                                                                                                           |
-| `GET /notifications`                                           | signed in      | Inbox and unread count                                                                                                                                                                                                                      |
-| `POST /notifications/:id/read`, `POST /notifications/read-all` | signed in      | Mark as read                                                                                                                                                                                                                                |
-| `GET /users/staff`                                             | staff          | Assignable staff                                                                                                                                                                                                                            |
-| `GET /users`, `PATCH /users/:id`                               | admin          | Manage roles, activation and agent skills                                                                                                                                                                                                   |
-| `GET /audit`                                                   | admin          | Global activity stream with filters                                                                                                                                                                                                         |
+```bash
+DATABASE_URL_TEST=postgresql://itsm:itsm_password@localhost:5432/itsm_test npm run test:integration
+```
 
-Common error codes: `VALIDATION_ERROR` (400), `UNAUTHORIZED` (401), `FORBIDDEN` (403), `NOT_FOUND` (404), `INVALID_STATUS_TRANSITION` (422), `STALE_TICKET` and `TICKET_CLOSED` (409), `RATE_LIMITED` (429).
+Replace the example credentials if your PostgreSQL configuration uses different values.
 
-## Real-time events
+If `DATABASE_URL_TEST` is not configured, the integration suites skip themselves.
 
-Connect with the same cookie as the REST API. Unauthenticated connections are rejected.
+## API Reference
 
-| Event (server → client) | Payload                                                     | Sent to                                                    |
-| ----------------------- | ----------------------------------------------------------- | ---------------------------------------------------------- |
-| `ticket:created`        | ticket summary                                              | staff, requester                                           |
-| `ticket:updated`        | `{ ticket, change }` (`status`, `assignment` or `priority`) | staff, requester, ticket room                              |
-| `message:new`           | `{ ticketId, message }`                                     | ticket room (public) or ticket staff room (internal notes) |
-| `activity:new`          | audit entry                                                 | ticket staff room                                          |
-| `notification:new`      | notification                                                | the recipient                                              |
-| `ticket:typing`         | `{ ticketId, userId, name, isTyping }`                      | other participants                                         |
+All endpoints are mounted under `/api`, accept JSON where applicable, and use the session cookie for authenticated requests.
 
-| Event (client → server) | Payload                  | Notes                                                  |
-| ----------------------- | ------------------------ | ------------------------------------------------------ |
-| `ticket:join`           | `{ ticketId }`           | Acknowledged with `{ ok }`; permissions are re-checked |
-| `ticket:leave`          | `{ ticketId }`           |                                                        |
-| `ticket:typing`         | `{ ticketId, isTyping }` | Only accepted after a successful join                  |
+API errors follow this structure:
+
+```json
+{
+  "error": {
+    "code": "ERROR_CODE",
+    "message": "A description of the error",
+    "details": {}
+  }
+}
+```
+
+### Authentication and Health
+
+| Method | Endpoint             | Access        | Description                                         |
+| ------ | -------------------- | ------------- | --------------------------------------------------- |
+| `GET`  | `/api/health`        | Public        | Checks application health and database connectivity |
+| `POST` | `/api/auth/register` | Public        | Registers a customer account                        |
+| `POST` | `/api/auth/login`    | Public        | Signs in and sets the session cookie                |
+| `POST` | `/api/auth/logout`   | Public        | Signs out                                           |
+| `GET`  | `/api/auth/me`       | Authenticated | Returns the current user                            |
+
+### Tickets and Messaging
+
+| Method  | Endpoint                    | Access         | Description                                                 |
+| ------- | --------------------------- | -------------- | ----------------------------------------------------------- |
+| `GET`   | `/api/tickets`              | Authenticated  | Lists tickets with filtering, sorting, and pagination       |
+| `POST`  | `/api/tickets`              | Authenticated  | Creates a ticket with automated routing and escalation      |
+| `GET`   | `/api/tickets/:id`          | Owner or staff | Returns ticket details, messages, and permitted transitions |
+| `PATCH` | `/api/tickets/:id/status`   | Owner or staff | Changes ticket status through the state machine             |
+| `PATCH` | `/api/tickets/:id/assignee` | Staff          | Assigns, reassigns, or unassigns a ticket                   |
+| `PATCH` | `/api/tickets/:id/priority` | Staff          | Changes ticket priority and SLA deadline                    |
+| `GET`   | `/api/tickets/:id/activity` | Staff          | Returns a ticket's audit timeline                           |
+| `POST`  | `/api/tickets/:id/messages` | Owner or staff | Sends a message or staff-only internal note                 |
+
+The ticket-list endpoint supports filters including:
+
+- `status`
+- `priority`
+- `category`
+- `assignee` (`me`, `unassigned`, or a user ID)
+- `q` for text search
+- `sort` (`newest`, `oldest`, `updated`, or `priority`)
+- `page`
+- `pageSize`
+
+Customers can only access their own tickets.
+
+### Analytics, Notifications, and Users
+
+| Method  | Endpoint                         | Access        | Description                                               |
+| ------- | -------------------------------- | ------------- | --------------------------------------------------------- |
+| `GET`   | `/api/analytics/overview?days=7` | Staff         | Returns dashboard metrics; supports 7, 14, 30, or 90 days |
+| `GET`   | `/api/notifications`             | Authenticated | Returns the notification inbox and unread count           |
+| `POST`  | `/api/notifications/:id/read`    | Authenticated | Marks a notification as read                              |
+| `POST`  | `/api/notifications/read-all`    | Authenticated | Marks all notifications as read                           |
+| `GET`   | `/api/users/staff`               | Staff         | Lists assignable staff                                    |
+| `GET`   | `/api/users`                     | Admin         | Lists users                                               |
+| `PATCH` | `/api/users/:id`                 | Admin         | Updates user roles, activation, or agent skills           |
+| `GET`   | `/api/audit`                     | Admin         | Returns the global audit stream with filters              |
+
+### Common API Error Codes
+
+| Code                        | HTTP Status | Meaning                                                 |
+| --------------------------- | ----------: | ------------------------------------------------------- |
+| `VALIDATION_ERROR`          |         400 | Request data is invalid                                 |
+| `UNAUTHORIZED`              |         401 | Authentication is required                              |
+| `FORBIDDEN`                 |         403 | The user lacks permission                               |
+| `NOT_FOUND`                 |         404 | The requested resource was not found or is inaccessible |
+| `INVALID_STATUS_TRANSITION` |         422 | The requested ticket transition is not permitted        |
+| `STALE_TICKET`              |         409 | The ticket changed before the update could be applied   |
+| `TICKET_CLOSED`             |         409 | The ticket is closed and cannot be modified in that way |
+| `RATE_LIMITED`              |         429 | Too many requests                                       |
+
+## Real-Time Events
+
+Socket.IO authenticates connections using the same session cookie as the REST API. Unauthenticated connections are rejected.
+
+### Server-to-Client Events
+
+| Event              | Payload                                | Recipients                                           |
+| ------------------ | -------------------------------------- | ---------------------------------------------------- |
+| `ticket:created`   | Ticket summary                         | Staff and requester                                  |
+| `ticket:updated`   | `{ ticket, change }`                   | Staff, requester, and authorised ticket participants |
+| `message:new`      | `{ ticketId, message }`                | Public ticket room or staff-only ticket room         |
+| `activity:new`     | Audit entry                            | Authorised ticket staff                              |
+| `notification:new` | Notification                           | Intended recipient                                   |
+| `ticket:typing`    | `{ ticketId, userId, name, isTyping }` | Other authorised participants                        |
+
+### Client-to-Server Events
+
+| Event           | Payload                  | Description                                                 |
+| --------------- | ------------------------ | ----------------------------------------------------------- |
+| `ticket:join`   | `{ ticketId }`           | Requests access to a ticket room; permissions are rechecked |
+| `ticket:leave`  | `{ ticketId }`           | Leaves a ticket room                                        |
+| `ticket:typing` | `{ ticketId, isTyping }` | Sends typing status after successfully joining the room     |
 
 ## Configuration
 
-Server variables (`server/.env`, validated at start-up):
+Server configuration is managed through `server/.env` and validated at startup.
 
-| Variable               | Default                 | Description                                               |
-| ---------------------- | ----------------------- | --------------------------------------------------------- |
-| `NODE_ENV`             | `development`           | `development`, `test` or `production`                     |
-| `PORT`                 | `4000`                  | API port                                                  |
-| `DATABASE_URL`         | none (required)         | PostgreSQL connection string                              |
-| `JWT_SECRET`           | none (required)         | Session signing secret, at least 32 characters            |
-| `JWT_EXPIRES_IN_HOURS` | `12`                    | Session lifetime                                          |
-| `CLIENT_ORIGIN`        | `http://localhost:5173` | Allowed browser origin for CORS and Socket.io             |
-| `ASSIGNMENT_STRATEGY`  | `LEAST_ACTIVE`          | Default routing strategy: `LEAST_ACTIVE` or `ROUND_ROBIN` |
-| `LOG_LEVEL`            | `info`                  | `fatal` … `trace`, or `silent`                            |
-| `SEED_PASSWORD`        | `ChangeMe123!`          | Password given to demo accounts by the seed script        |
+| Variable               | Default                 | Description                                                                            |
+| ---------------------- | ----------------------- | -------------------------------------------------------------------------------------- |
+| `NODE_ENV`             | `development`           | Runtime environment: `development`, `test`, or `production`                            |
+| `PORT`                 | `4000`                  | Backend API port                                                                       |
+| `DATABASE_URL`         | Required                | PostgreSQL connection string                                                           |
+| `JWT_SECRET`           | Required                | Session-signing secret of at least 32 characters                                       |
+| `JWT_EXPIRES_IN_HOURS` | `12`                    | Session lifetime in hours                                                              |
+| `CLIENT_ORIGIN`        | `http://localhost:5173` | Allowed browser origin for CORS and Socket.IO                                          |
+| `ASSIGNMENT_STRATEGY`  | `LEAST_ACTIVE`          | Default routing strategy: `LEAST_ACTIVE` or `ROUND_ROBIN`                              |
+| `LOG_LEVEL`            | `info`                  | Logging level, such as `fatal`, `error`, `warn`, `info`, `debug`, `trace`, or `silent` |
+| `SEED_PASSWORD`        | `ChangeMe123!`          | Password assigned to seeded demo accounts                                              |
 
-Client variables (`client/.env`, optional): `VITE_API_PROXY_TARGET` changes where the dev server proxies to; `VITE_API_URL` points a production build at an API on another origin.
+Optional frontend variables are configured through `client/.env`:
+
+| Variable                | Description                                            |
+| ----------------------- | ------------------------------------------------------ |
+| `VITE_API_PROXY_TARGET` | Changes the target used by the Vite development proxy  |
+| `VITE_API_URL`          | Configures the API URL for a production frontend build |
+
+Use the `.env.example` files as the source of truth for the variables supported by your current project version.
+
+**Never commit `.env` files, production secrets, or real credentials to GitHub.**
 
 ## Deployment
 
-1. Provision PostgreSQL and set `DATABASE_URL`, a strong `JWT_SECRET`, `NODE_ENV=production` and `CLIENT_ORIGIN` (the public URL of the web app) for the server.
-2. Build: `npm ci && npm run build`.
-3. Apply migrations on every release: `npm run db:migrate` (safe to repeat; it only applies what is pending).
-4. Run the API with `npm start -w server`. Do **not** run the seed in production.
-5. Serve `client/dist` as static files from the same origin as the API behind a reverse proxy (Nginx, Caddy, a cloud load balancer) that forwards `/api` and `/socket.io` (with WebSocket upgrade) to the Node process. A shared origin keeps the session cookie first-party.
-6. Terminate TLS at the proxy. In production the cookie is `Secure`, and the server trusts one proxy hop for client IP addresses.
+The application requires a deployed Node.js backend and PostgreSQL database for its full functionality.
 
-Suggested CI steps on every push: `npm ci`, `npm run typecheck`, `npm test`, then `npm run test:integration` against a PostgreSQL service container.
+### Production Deployment Steps
 
-**Scaling beyond one server instance:** Socket.io keeps connection state in memory. Add the Redis adapter and move the in-process event bus to Redis pub/sub so events reach sockets on every instance. Everything else is already stateless.
+1. Provision a PostgreSQL database.
+2. Configure `DATABASE_URL`, a strong `JWT_SECRET`, `NODE_ENV=production`, and the correct `CLIENT_ORIGIN` on the backend.
+3. Install dependencies and build the application:
 
-## Design decisions and next steps
+   ```bash
+   npm ci
+   npm run build
+   ```
 
-- **Commands inside transactions, events after commit.** Prevents audit entries that disagree with data and "ghost" real-time updates.
-- **Rules in the database too.** Application code can be bypassed (scripts, a second service, a bad deploy). Triggers and constraints cannot.
-- **Pure domain logic.** The state machine, routing and SLA code import no database or framework, so they are fast to test and easy to change.
-- **Server-sent truth with a query cache.** The client keeps server data in TanStack Query and invalidates it when a real-time event arrives, instead of duplicating state.
-- **No ORM for reporting.** Averages, per-day series and per-agent results are plain SQL with explicit casts; Prisma handles everything transactional.
+4. Apply pending database migrations:
 
-Natural next steps: email notifications through an adapter behind a `Notifier` interface, file attachments (object storage with signed URLs), business-hours-aware SLA clocks with pause-while-waiting, a knowledge base with suggested articles, and saved queue views.
+   ```bash
+   npm run db:migrate
+   ```
+
+5. Start the backend:
+
+   ```bash
+   npm start -w server
+   ```
+
+6. Serve the built frontend from `client/dist`.
+7. Configure a reverse proxy or load balancer to forward `/api` and `/socket.io` to the backend. Ensure WebSocket upgrades are supported.
+8. Enable HTTPS and verify that production cookies use the `Secure` attribute.
+
+Do not run the demo seed script in production.
+
+Serving the frontend and API from the same origin simplifies cookie-based authentication. If they use different origins, configure CORS, cookie settings, and credentials carefully.
+
+### Continuous Integration
+
+A recommended CI pipeline should run:
+
+1. `npm ci`
+2. `npm run typecheck`
+3. `npm test`
+4. `npm run test:integration` against a dedicated PostgreSQL test database.
+5. `npm run build`
+
+### Scaling
+
+The current real-time event bus and Socket.IO connection state are designed for a single backend instance.
+
+For multiple instances, consider introducing a Redis adapter for Socket.IO and a shared event-publishing mechanism so events reach connected users across all instances.
+
+## Design Decisions and Future Improvements
+
+### Key Design Decisions
+
+- **Transactional commands:** Ticket changes and related audit entries are committed together.
+- **Events after commit:** Prevents clients from receiving real-time updates for database changes that were rolled back.
+- **Database-level safeguards:** Triggers and constraints protect important rules even when changes bypass application services.
+- **Separation of concerns:** Routes, controllers, services, and domain logic have distinct responsibilities.
+- **Testable business logic:** Routing, ticket transitions, and SLA calculations can be tested independently.
+- **Centralised server state:** TanStack Query manages API data, while real-time events trigger cache updates.
+- **SQL-based reporting:** PostgreSQL performs analytics aggregations, while Prisma handles transactional application operations.
+
+### Potential Future Improvements
+
+- Email notifications through a dedicated notification adapter.
+- File attachments stored in object storage using signed URLs.
+- Business-hours-aware SLA calculations and automatic SLA pauses.
+- A knowledge base with suggested solutions for common support requests.
+- Saved ticket filters and personalised queue views.
+- Redis-backed real-time event distribution for multi-instance deployments.
+- Expanded end-to-end tests and automated deployment workflows.
 
 ## Troubleshooting
 
-| Symptom                                                 | Fix                                                                                                                 |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `Invalid environment configuration` on start            | A required variable in `server/.env` is missing or invalid; the message names it. `JWT_SECRET` needs 32+ characters |
-| `Cannot find module '../generated/prisma/client'`       | Run `npm run db:generate`                                                                                           |
-| `Ticket state machine is out of sync with the database` | Migrations are missing or old: run `npm run db:migrate`                                                             |
-| `ECONNREFUSED` to port 5432                             | PostgreSQL is not running: `docker compose up -d` and wait for _healthy_                                            |
-| Port 5432, 4000 or 5173 already in use                  | Stop the other process, or change the port (`docker-compose.yml`, `PORT`, Vite `server.port`)                       |
-| Signed out immediately in production                    | The cookie is `Secure`; serve over HTTPS and keep the web app and API on the same origin                            |
-| Integration tests are skipped                           | Set `DATABASE_URL_TEST` (see [Testing](#testing))                                                                   |
+| Problem                                                 | Possible Solution                                                                                     |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `Invalid environment configuration`                     | Check `server/.env` for missing or invalid values. Ensure `JWT_SECRET` is at least 32 characters.     |
+| `Cannot find module '../generated/prisma/client'`       | Run `npm run db:generate` and check the configured Prisma generator.                                  |
+| `Ticket state machine is out of sync with the database` | Apply pending migrations using `npm run db:migrate`.                                                  |
+| `ECONNREFUSED` on port 5432                             | Start PostgreSQL with `docker compose up -d` and wait for it to become healthy.                       |
+| Port 5432, 4000, or 5173 is already in use              | Stop the conflicting process or change the relevant port configuration.                               |
+| Login does not persist in production                    | Verify HTTPS, cookie settings, frontend/API origin configuration, and reverse-proxy headers.          |
+| Integration tests are skipped                           | Configure `DATABASE_URL_TEST` to point to a dedicated test database.                                  |
+| Frontend cannot reach the API                           | Verify that the backend is running and that the development proxy or production API URL is correct.   |
+| Real-time updates are missing                           | Check the Socket.IO connection, authentication cookie, server logs, and room permissions.             |
+| Screenshots do not appear on GitHub                     | Confirm that all four image files exist under `docs/screenshots/` and have been committed and pushed. |
 
 ## License
 
-MIT
+This project is licensed under the MIT License.
