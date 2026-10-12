@@ -1,416 +1,422 @@
-# ITSM Helpdesk
+# Task Board
 
-An IT helpdesk and customer-support ticketing system. Customers raise requests and chat with support in real time; agents work a prioritised queue with automatic routing, SLA tracking and a live analytics dashboard; admins manage the team and review a permanent audit trail.
+A real-time, collaborative Kanban board inspired by Trello and Linear. Organize workspaces, manage tasks, and collaborate with team members through a responsive interface with live updates.
 
-## Contents
+Built with a modern TypeScript stack, PostgreSQL, and Socket.IO.
 
-- [Features](#features)
-- [Technologies](#technologies)
-- [Architecture](#architecture)
-- [Project structure](#project-structure)
-- [Local setup](#local-setup)
-- [Demo accounts](#demo-accounts)
-- [Scripts](#scripts)
-- [Testing](#testing)
-- [API reference](#api-reference)
-- [Real-time events](#real-time-events)
-- [Configuration](#configuration)
-- [Deployment](#deployment)
-- [Design decisions and next steps](#design-decisions-and-next-steps)
-- [Troubleshooting](#troubleshooting)
+<!-- Replace these placeholders with screenshots of the running application. -->
+<!--
+## Preview
+
+![Task Board Preview](docs/screenshots/board.png)
+-->
 
 ## Features
 
-| Area | What it does |
-| --- | --- |
-| **Status state machine** | `OPEN → IN_PROGRESS → WAITING_ON_CUSTOMER → RESOLVED → CLOSED`, plus the two legal loops (work resumes after waiting; a resolved ticket can be reopened). `CLOSED` is terminal. Enforced in the API **and** by a PostgreSQL trigger. |
-| **Automated routing** | A rule engine assigns each new ticket by category and priority using *least-active* (priority-weighted workload) or *round-robin* selection, preferring agents whose skills match. |
-| **Real-time collaboration** | Socket.io powers live chat, typing indicators, notifications and instant queue/dashboard updates. |
-| **Analytics** | Average resolution time, first-response time, SLA compliance, ticket volume per day, status/priority/category breakdowns and per-agent results, computed in SQL on indexed columns. |
-| **Audit log** | Every ticket creation, status change, assignment, priority change and internal note is recorded. The table is append-only: database triggers reject `UPDATE`, `DELETE` and `TRUNCATE`. |
-| **Priorities and SLA** | `LOW / MEDIUM / HIGH / CRITICAL` with resolution targets of 72 h / 24 h / 8 h / 4 h. Keyword rules escalate obvious emergencies (for example a suspected phishing attack). |
-| **Roles** | Customers see only their own tickets; agents work the queue; admins also manage users and see the global audit stream. Internal notes never reach customers. |
-| **Notifications** | In-app notifications for assignments, status changes and new messages, delivered live and kept in an inbox. |
+- **Kanban task management** — Organize tasks into board columns with drag-and-drop interactions.
+- **Real-time collaboration** — Synchronize board changes across connected clients using Socket.IO.
+- **Workspaces and membership** — Organize teams and manage workspace members.
+- **Authentication** — Secure API access using JWT-based authentication.
+- **Persistent storage** — Store application data in PostgreSQL using Prisma ORM.
+- **Input validation** — Validate incoming data with Zod.
+- **Type-safe development** — Use TypeScript across the frontend and backend.
+- **Automated testing** — Run backend and frontend tests to verify application behavior.
+- **Developer-friendly setup** — Run the database locally with Docker Compose.
 
-## Technologies
+## Tech Stack
 
-| Layer | Stack |
-| --- | --- |
-| Frontend | React 19, TypeScript, Vite, React Router, TanStack Query, Tailwind CSS v4, Lucide React icons |
-| Backend | Node.js, Express 5, Socket.io, Zod (validation), Pino (logging), Helmet, express-rate-limit |
-| Database | PostgreSQL with Prisma ORM (compound indexes, raw SQL for reporting, SQL triggers for guarantees) |
-| Auth | Password hashing with bcrypt; session token in an `httpOnly`, `SameSite=Lax` cookie (also used to authenticate WebSockets) |
-| Testing | Vitest (unit and integration against a real PostgreSQL) |
-| Tooling | npm workspaces, Docker Compose for local PostgreSQL |
+### Frontend
+
+| Technology | Purpose |
+|---|---|
+| React 19 | User interface |
+| TypeScript | Static typing |
+| Vite | Development server and build tooling |
+| Tailwind CSS v4 | Styling |
+| TanStack Query | Server-state management |
+| dnd-kit | Drag-and-drop interactions |
+| Socket.IO Client | Real-time communication |
+
+### Backend
+
+| Technology | Purpose |
+|---|---|
+| Node.js 22 | JavaScript runtime |
+| Express 5 | HTTP API and middleware |
+| TypeScript | Static typing |
+| PostgreSQL 15+ | Relational database |
+| Prisma ORM 7 | Database access and migrations |
+| Socket.IO | Real-time event communication |
+| Zod | Request and data validation |
+| JWT | Token-based authentication |
 
 ## Architecture
 
-```text
-┌────────────────────────────── Browser ──────────────────────────────┐
-│  React app  ──  TanStack Query cache  ◄──── live invalidation ◄──┐  │
-│     │ REST (cookie session)                                       │  │
-└─────┼─────────────────────────────────────────────────────────────┼──┘
-      │ /api/*                                          /socket.io  │
-┌─────▼─────────────────────────────────────────────────────────────┼──┐
-│  Express                                                          │  │
-│   middleware: helmet · cors · rate-limit · auth · error handler   │  │
-│   routes ─► controller (parse + validate) ─► service (rules)      │  │
-│                                   │                               │  │
-│                  one DB transaction per command                   │  │
-│          (state machine · routing · audit · notifications)        │  │
-│                                   │ after COMMIT                  │  │
-│                         domain event bus ──► Socket.io gateway ───┘  │
-└───────────────────────────────────┬──────────────────────────────────┘
-                                    │ Prisma (pg driver adapter)
-                       ┌────────────▼─────────────┐
-                       │       PostgreSQL         │
-                       │ indexes · triggers · FKs │
-                       └──────────────────────────┘
-```
-
-### Request lifecycle
-
-1. **Route → controller.** Controllers parse input with Zod and call a service. They contain no business rules.
-2. **Service → command runner.** Every change to a ticket runs inside one database transaction (`runCommand`). The transition, the audit entry and the notifications commit together or not at all.
-3. **After commit → events.** Services queue *domain events* while the transaction runs. They are published only after `COMMIT`, so clients never hear about a change that was rolled back.
-4. **Gateway.** The Socket.io gateway is the only code that knows about sockets. It subscribes to the event bus and pushes updates to the right rooms.
-
-### Status state machine (two layers)
-
-- **API layer** (`ticket.state-machine.ts`): the table of legal edges and which roles may use them. It produces friendly errors: `422 INVALID_STATUS_TRANSITION` for an edge that does not exist and `403` for an edge the role may not use. Customers may only confirm (`CLOSED`) or reopen (`IN_PROGRESS`) a resolved ticket.
-- **Database layer** (migration `db_guards`): a `BEFORE INSERT OR UPDATE OF status` trigger consults the `ticket_status_transitions` table, and `CHECK` constraints keep `resolvedAt` / `closedAt` consistent with the status. Even a manual SQL statement cannot skip a stage.
-- **Drift protection:** on start-up the server compares both copies and refuses to boot if they disagree. Updates are also conditional on the status that was read, so two agents racing on one ticket cannot both win (`409 STALE_TICKET`).
-
-### Automated routing
-
-`routing.engine.ts` is pure logic (no database, clock or environment), so every branch is unit-tested. Rules are evaluated in order; the first match wins:
-
-| Rule | When | Selection |
-| --- | --- | --- |
-| `critical-least-active` | priority is `CRITICAL` | least-loaded skilled agent |
-| `security-least-active` | category is `SECURITY` | least-loaded security specialist |
-| `specialist-round-robin` | any other category except `OTHER` | rotate fairly between matching specialists |
-| `default` | everything else | the configured `ASSIGNMENT_STRATEGY` |
-
-*Workload* is priority-weighted (`LOW 1`, `MEDIUM 2`, `HIGH 3`, `CRITICAL 5` per active ticket). If a rule wants a specialist and none exists, the pool falls back to all agents so tickets never sit unrouted. An advisory lock serialises concurrent ticket creation so two requests cannot read the same workload and pick the same agent. The automated assignment is recorded in the audit log with the rule that decided it.
-
-### Analytics and indexing
-
-Aggregations run in PostgreSQL, not in Node. The compound indexes in `schema.prisma` map to real query paths:
-
-| Index | Serves |
-| --- | --- |
-| `tickets (status, priority, createdAt DESC)` | staff queue filtered by status, sorted by urgency |
-| `tickets (assigneeId, status, updatedAt DESC)` | "my queue" and per-agent workload |
-| `tickets (requesterId, createdAt DESC)` | "my tickets" for customers |
-| `tickets (category, status)` | category filters and breakdowns |
-| `tickets (createdAt)` / `tickets (resolvedAt)` | volume-over-time and resolution-time range scans |
-| `tickets (status, slaDueAt)` | overdue (SLA) scans over active tickets |
-| `audit_logs (ticketId, createdAt)` and others | per-ticket timeline, global stream, actor and action filters |
-| `notifications (userId, readAt, createdAt DESC)` | inbox and unread counts |
-
-### Real-time rooms and privacy
-
-Rooms are the authorisation boundary of the real-time layer. A socket only receives what is emitted to rooms it was allowed to join:
-
-- `staff` — every agent and admin (live queue and dashboard)
-- `user:<id>` — one person's private channel (notifications, "my tickets")
-- `ticket:<id>` — participants of a ticket (public chat)
-- `ticket:<id>:staff` — staff on a ticket (internal notes and audit activity)
-
-Joining a ticket room re-checks permissions on the server, and internal notes are only ever emitted to the staff room.
-
-### Security notes
-
-- Session cookie is `httpOnly`, `SameSite=Lax` and `Secure` in production; users are re-read on every request, so deactivation and role changes apply immediately.
-- Login does not reveal whether an email exists, and compares against a dummy hash to keep timing uniform.
-- Every input is validated with Zod; error responses use a stable `{ error: { code, message, details? } }` shape.
-- Rate limiting on the whole API and a stricter limit on sign-in and registration.
-- Ticket ids cannot be probed: another customer's ticket returns `404`, not `403`.
-- Admins cannot demote or deactivate themselves.
-- Secrets come from environment variables; the server refuses to start with a weak `JWT_SECRET`.
-
-## Project structure
+The application separates the frontend, backend API, database, and real-time communication into distinct layers.
 
 ```text
-itsm-helpdesk/
-├── docker-compose.yml          # local PostgreSQL
-├── package.json                # npm workspaces + root scripts
-├── scripts/package.sh          # builds a clean zip of the project
+task-board-app/
 ├── server/
 │   ├── prisma/
-│   │   ├── schema.prisma       # data model + compound indexes
-│   │   ├── migrations/         # init + db_guards (triggers, constraints)
-│   │   └── seed.ts             # demo users and ~54 tickets
+│   │   ├── schema.prisma
+│   │   └── migrations/
 │   ├── src/
-│   │   ├── config/             # validated environment
-│   │   ├── domain/             # enums shared by all layers (no persistence imports)
-│   │   ├── events/             # domain events + in-process event bus
-│   │   ├── lib/                # errors, tokens, password, pagination, Prisma client
-│   │   ├── middleware/         # auth, errors, rate limiting
+│   │   ├── server.ts
 │   │   ├── modules/
-│   │   │   ├── auth/  users/  notifications/  audit/  analytics/  health/
-│   │   │   ├── messages/       # chat + internal notes
-│   │   │   ├── routing/        # rule engine, escalation, workload loading
-│   │   │   └── tickets/        # state machine, commands, queries, SLA
-│   │   ├── realtime/           # Socket.io server, auth, rooms, event forwarder
-│   │   ├── routes/             # mounts every module under /api
-│   │   ├── app.ts              # Express app (testable without listening)
-│   │   └── server.ts           # start-up, graceful shutdown
-│   └── tests/
-│       ├── unit/               # state machine, routing, SLA, error mapping
-│       └── integration/        # DB triggers + full API flow (real PostgreSQL)
-└── client/
-    └── src/
-        ├── api/                # typed endpoint functions
-        ├── components/         # ui/ · layout/ · tickets/ · analytics/
-        ├── context/            # auth, socket, toasts, live sync
-        ├── hooks/              # data hooks, ticket room, live sync, debounce
-        ├── lib/                # formatting, labels, query keys, filters
-        ├── pages/              # one file per screen
-        └── types/              # API response types
+│   │   │   └── ...
+│   │   ├── middleware/
+│   │   └── realtime/
+│   └── package.json
+│
+├── client/
+│   ├── src/
+│   │   ├── lib/
+│   │   │   └── api/
+│   │   ├── features/
+│   │   │   └── board/
+│   │   ├── components/
+│   │   └── ...
+│   ├── vite.config.ts
+│   └── package.json
+│
+├── docker-compose.yml
+├── AUDIT.md
+└── README.md
 ```
 
-Each backend module follows the same shape: `*.routes.ts` → `*.controller.ts` → `*.service.ts`, with `*.schemas.ts` (Zod) and `*.selects.ts` (Prisma selects and DTO types) alongside.
+*The directory tree above highlights the main application areas. Individual files and modules may vary with the implementation.*
 
-## Local setup
+### How it works
 
-### Prerequisites
+1. **React client:** Renders the interface and manages server state through TanStack Query.
+2. **Express API:** Processes HTTP requests, applies middleware, validates input, and executes application logic.
+3. **PostgreSQL and Prisma:** Persist application data and manage database schema migrations.
+4. **Socket.IO:** Delivers real-time events to connected clients when relevant board data changes.
+5. **Authentication and validation:** JWT-based authentication and Zod validation help protect API operations and enforce data contracts.
 
-- **Node.js 22.12 or newer** and npm 10+ (`node -v`)
-- **PostgreSQL 15+**, either through **Docker** (recommended, a compose file is included) or a local installation
-- Git (optional)
+For additional implementation notes, see [`AUDIT.md`](AUDIT.md).
 
-### 1. Install dependencies
+## Prerequisites
 
-From the project root:
+Install the following before running the application:
+
+- [Node.js 22 or later](https://nodejs.org/)
+- npm
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) or another Docker-compatible environment with Docker Compose
+- Git, if cloning the repository
+
+Alternatively, use PostgreSQL 15 or later installed locally and configure the appropriate database connection string.
+
+## Getting Started
+
+Follow these steps to run the application locally.
+
+### 1. Clone the repository
 
 ```bash
-npm install
+git clone <your-repository-url>
+cd task-board-app
 ```
 
-This installs both workspaces and generates the Prisma client automatically.
+Replace `<your-repository-url>` with your actual Git repository URL.
 
-### 2. Configure environment variables
+### 2. Start PostgreSQL
 
-```bash
-# macOS / Linux
-cp server/.env.example server/.env
-
-# Windows (PowerShell)
-Copy-Item server/.env.example server/.env
-```
-
-Open `server/.env` and set at least `JWT_SECRET`. Generate one with:
-
-```bash
-node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
-```
-
-The defaults already match the bundled Docker database. See [Configuration](#configuration) for every variable.
-
-### 3. Start PostgreSQL
-
-With Docker:
+From the project root, run:
 
 ```bash
 docker compose up -d
 ```
 
-Wait until `docker compose ps` shows the database as *healthy*. If you use your own PostgreSQL instead, create an empty database and put its connection string in `DATABASE_URL`.
+This starts the PostgreSQL service defined in `docker-compose.yml`.
 
-### 4. Create the schema and load demo data
+Ensure the database is healthy and its connection settings match those configured in the backend environment.
 
-```bash
-npm run db:migrate   # applies the migrations (tables, indexes, triggers, constraints)
-npm run db:seed      # demo accounts and sample tickets
-```
+### 3. Configure the backend
 
-Optional check that the live schema matches `schema.prisma`:
+Open a terminal at the project root:
 
 ```bash
-cd server && npx prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --exit-code
+cd server
 ```
 
-### 5. Run the app
+Create the environment file:
+
+```bash
+cp .env.example .env
+```
+
+Open `server/.env` and configure the required values.
+
+At minimum, ensure the database connection string and JWT secret are configured correctly.
+
+Generate a secure JWT secret using Node.js:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
+```
+
+Copy the generated value into `JWT_ACCESS_SECRET` in `server/.env`.
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Apply the existing Prisma migrations:
+
+```bash
+npx prisma migrate deploy
+```
+
+Start the backend development server:
 
 ```bash
 npm run dev
 ```
 
-This starts both processes:
+The backend is expected to run at:
 
-| Service | URL |
-| --- | --- |
-| Web app (Vite) | http://localhost:5173 |
-| API and Socket.io | http://localhost:4000 (health check: `/api/health`) |
+**http://localhost:4000**
 
-In development the web app proxies `/api` and `/socket.io` to the API, so the browser only ever talks to one origin. To run the processes separately, use `npm run dev -w server` and `npm run dev -w client` in two terminals.
+Keep this terminal running.
 
-Sign in with one of the demo accounts below. To see real-time behaviour, sign in as a customer in one browser window and as an agent in another (a private window works), then reply to the same ticket from both.
+### 4. Configure the frontend
 
-## Demo accounts
-
-Created by `npm run db:seed`. The password for every account is the `SEED_PASSWORD` value (default `ChangeMe123!`).
-
-| Role | Email | Skills |
-| --- | --- | --- |
-| Admin | `admin@itsm.dev` | - |
-| Agent | `grace.agent@itsm.dev` | Network, Security |
-| Agent | `brian.agent@itsm.dev` | Hardware, Software |
-| Agent | `fatuma.agent@itsm.dev` | Access, Email |
-| Agent | `peter.agent@itsm.dev` | Software, Network, Other |
-| Customer | `mary.customer@itsm.dev` | - |
-| Customer | `john.customer@itsm.dev` | - |
-| Customer | `lucy.customer@itsm.dev` | - |
-| Customer | `david.customer@itsm.dev` | - |
-
-Change `SEED_PASSWORD` before seeding anything that is reachable from the internet. Seeding is repeatable: users are updated in place and sample tickets are only created when the database has none.
-
-## Scripts
-
-Run from the project root.
-
-| Command | Description |
-| --- | --- |
-| `npm run dev` | API and web app with hot reload |
-| `npm run build` | Type-checks and builds the server (`server/dist`) and client (`client/dist`) |
-| `npm run typecheck` | Strict TypeScript check of both packages |
-| `npm test` | Unit tests (no database needed) |
-| `npm run test:integration` | Integration tests against a real PostgreSQL (see below) |
-| `npm run db:generate` | Regenerates the Prisma client |
-| `npm run db:migrate` | Applies pending migrations (`prisma migrate deploy`) |
-| `npm run db:seed` | Loads the demo data |
-| `npm run db:reset` | Drops, re-migrates and re-seeds the database (development only) |
-| `npm run archive` | Writes a clean `../itsm-helpdesk.zip` without dependencies or secrets |
-
-Run `npm run db:migrate:dev -w server` when you change `schema.prisma` and need Prisma to author a new migration.
-
-## Testing
-
-**Unit tests** cover the state machine, routing engine, escalation rules, SLA maths and database-error mapping. They need nothing external:
+Open a second terminal at the project root:
 
 ```bash
+cd client
+```
+
+Create the frontend environment file:
+
+```bash
+cp .env.example .env
+```
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Start the Vite development server:
+
+```bash
+npm run dev
+```
+
+The frontend is expected to run at:
+
+**http://localhost:5173**
+
+### 5. Open the application
+
+Visit [http://localhost:5173](http://localhost:5173) in your browser.
+
+Register an account, create a workspace, and create a board.
+
+To test collaboration:
+
+1. Open the application in a second browser profile.
+2. Register or sign in with a second account.
+3. Add that account to the workspace through the member-management interface.
+4. Open the same board in both browser profiles.
+5. Make changes and verify that connected clients receive the relevant updates.
+
+Both accounts must have the necessary workspace and board permissions.
+
+## Environment Variables
+
+Configure the following variables in the appropriate environment files.
+
+### Backend — `server/.env`
+
+| Variable | Description |
+|---|---|
+| `DATABASE_URL` | PostgreSQL connection string |
+| `JWT_ACCESS_SECRET` | Secret used to sign access tokens |
+| `CLIENT_ORIGIN` | Allowed frontend origin for CORS and Socket.IO |
+| `PORT` | Backend port; defaults to `4000` if configured that way in the application |
+| `ACCESS_TOKEN_TTL_SECONDS` | Optional access-token lifetime |
+| `REFRESH_TOKEN_TTL_DAYS` | Optional refresh-token lifetime |
+
+Example values:
+
+```dotenv
+DATABASE_URL="postgresql://USER:PASSWORD@localhost:5432/task_board?schema=public"
+JWT_ACCESS_SECRET="replace-with-a-secure-random-secret"
+CLIENT_ORIGIN="http://localhost:5173"
+PORT=4000
+```
+
+Adjust the database username, password, database name, and other values to match your local setup.
+
+**Security:** Never commit real secrets or production environment files to version control. Keep `.env` files private and provide `.env.example` files containing placeholders instead.
+
+### Frontend — `client/.env`
+
+| Variable | Description |
+|---|---|
+| `API_PROXY_TARGET` | Backend origin used by Vite to proxy API and Socket.IO requests during development |
+| `VITE_API_URL` | Optional API base URL when the frontend communicates with a different origin |
+
+For a standard local setup, leave `VITE_API_URL` empty if the application uses same-origin requests through the Vite proxy.
+
+The default backend origin is expected to be `http://localhost:4000`.
+
+## Database Migrations
+
+Prisma migrations are used to manage database schema changes.
+
+Apply existing migrations:
+
+```bash
+cd server
+npx prisma migrate deploy
+```
+
+When developing locally and changing `prisma/schema.prisma`, create and apply a migration using:
+
+```bash
+npx prisma migrate dev
+```
+
+If the project provides a Prisma generation script, run it after relevant schema or dependency changes:
+
+```bash
+npx prisma generate
+```
+
+Review migration files before applying schema changes to shared or production databases.
+
+## Testing and Code Quality
+
+Run the backend checks from the project root:
+
+```bash
+cd server
+npm run typecheck
 npm test
 ```
 
-**Integration tests** exercise the real thing: the PostgreSQL triggers and constraints directly through SQL, and the full HTTP API (authentication, roles, routing, state machine, chat privacy, audit trail, analytics).
-
-They use a **separate, disposable database**. The suite wipes its `public` schema and re-applies the migrations on every run, so never point it at data you care about.
+Run the frontend checks:
 
 ```bash
-# create the test database once (Docker setup)
-docker compose exec db psql -U itsm -d postgres -c "CREATE DATABASE itsm_test"
-
-# macOS / Linux
-DATABASE_URL_TEST=postgresql://itsm:itsm_password@localhost:5432/itsm_test npm run test:integration
-
-# Windows (PowerShell)
-$env:DATABASE_URL_TEST="postgresql://itsm:itsm_password@localhost:5432/itsm_test"; npm run test:integration
+cd client
+npm run typecheck
+npm run lint
+npm test
 ```
 
-Without `DATABASE_URL_TEST` the integration suites skip themselves.
+The current project documentation reports:
 
-## API reference
+- **Backend:** 23 tests
+- **Frontend:** 16 tests
 
-All endpoints live under `/api`, use JSON and authenticate with the session cookie. Errors look like `{ "error": { "code": "...", "message": "...", "details": ... } }`.
+These counts should be updated whenever the test suites change.
 
-| Method and path | Access | Description |
-| --- | --- | --- |
-| `GET /health` | public | Liveness and database reachability |
-| `POST /auth/register` | public | Create a customer account |
-| `POST /auth/login` | public | Sign in (sets the session cookie) |
-| `POST /auth/logout` | public | Sign out |
-| `GET /auth/me` | signed in | Current user |
-| `GET /tickets` | signed in | List with filters: `status`, `priority`, `category` (comma-separated), `assignee` (`me`, `unassigned` or a user id), `q`, `sort` (`newest`, `oldest`, `updated`, `priority`), `page`, `pageSize`. Customers only ever see their own tickets |
-| `POST /tickets` | signed in | Create (routed and escalated automatically) |
-| `GET /tickets/:id` | owner or staff | Detail with messages and the transitions you may perform |
-| `PATCH /tickets/:id/status` | owner or staff | Change status through the state machine |
-| `PATCH /tickets/:id/assignee` | staff | Assign, reassign or unassign |
-| `PATCH /tickets/:id/priority` | staff | Change priority (moves the SLA deadline) |
-| `GET /tickets/:id/activity` | staff | Audit timeline of one ticket |
-| `POST /tickets/:id/messages` | owner or staff | Chat message; `isInternal: true` for a staff-only note |
-| `GET /analytics/overview?days=7\|14\|30\|90` | staff | Dashboard metrics |
-| `GET /notifications` | signed in | Inbox and unread count |
-| `POST /notifications/:id/read`, `POST /notifications/read-all` | signed in | Mark as read |
-| `GET /users/staff` | staff | Assignable staff |
-| `GET /users`, `PATCH /users/:id` | admin | Manage roles, activation and agent skills |
-| `GET /audit` | admin | Global activity stream with filters |
+For a final verification, run the checks independently in both directories and confirm that every command exits successfully.
 
-Common error codes: `VALIDATION_ERROR` (400), `UNAUTHORIZED` (401), `FORBIDDEN` (403), `NOT_FOUND` (404), `INVALID_STATUS_TRANSITION` (422), `STALE_TICKET` and `TICKET_CLOSED` (409), `RATE_LIMITED` (429).
+## Production Build
 
-## Real-time events
+Build the backend:
 
-Connect with the same cookie as the REST API. Unauthenticated connections are rejected.
+```bash
+cd server
+npm run build
+```
 
-| Event (server → client) | Payload | Sent to |
-| --- | --- | --- |
-| `ticket:created` | ticket summary | staff, requester |
-| `ticket:updated` | `{ ticket, change }` (`status`, `assignment` or `priority`) | staff, requester, ticket room |
-| `message:new` | `{ ticketId, message }` | ticket room (public) or ticket staff room (internal notes) |
-| `activity:new` | audit entry | ticket staff room |
-| `notification:new` | notification | the recipient |
-| `ticket:typing` | `{ ticketId, userId, name, isTyping }` | other participants |
+Apply production database migrations:
 
-| Event (client → server) | Payload | Notes |
-| --- | --- | --- |
-| `ticket:join` | `{ ticketId }` | Acknowledged with `{ ok }`; permissions are re-checked |
-| `ticket:leave` | `{ ticketId }` | |
-| `ticket:typing` | `{ ticketId, isTyping }` | Only accepted after a successful join |
+```bash
+npm run db:deploy
+```
 
-## Configuration
+Start the backend:
 
-Server variables (`server/.env`, validated at start-up):
+```bash
+npm start
+```
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `NODE_ENV` | `development` | `development`, `test` or `production` |
-| `PORT` | `4000` | API port |
-| `DATABASE_URL` | none (required) | PostgreSQL connection string |
-| `JWT_SECRET` | none (required) | Session signing secret, at least 32 characters |
-| `JWT_EXPIRES_IN_HOURS` | `12` | Session lifetime |
-| `CLIENT_ORIGIN` | `http://localhost:5173` | Allowed browser origin for CORS and Socket.io |
-| `ASSIGNMENT_STRATEGY` | `LEAST_ACTIVE` | Default routing strategy: `LEAST_ACTIVE` or `ROUND_ROBIN` |
-| `LOG_LEVEL` | `info` | `fatal` … `trace`, or `silent` |
-| `SEED_PASSWORD` | `ChangeMe123!` | Password given to demo accounts by the seed script |
+Build the frontend in a separate terminal:
 
-Client variables (`client/.env`, optional): `VITE_API_PROXY_TARGET` changes where the dev server proxies to; `VITE_API_URL` points a production build at an API on another origin.
+```bash
+cd client
+npm run build
+```
 
-## Deployment
+Vite generates the production frontend in `client/dist`.
 
-1. Provision PostgreSQL and set `DATABASE_URL`, a strong `JWT_SECRET`, `NODE_ENV=production` and `CLIENT_ORIGIN` (the public URL of the web app) for the server.
-2. Build: `npm ci && npm run build`.
-3. Apply migrations on every release: `npm run db:migrate` (safe to repeat; it only applies what is pending).
-4. Run the API with `npm start -w server`. Do **not** run the seed in production.
-5. Serve `client/dist` as static files from the same origin as the API behind a reverse proxy (Nginx, Caddy, a cloud load balancer) that forwards `/api` and `/socket.io` (with WebSocket upgrade) to the Node process. A shared origin keeps the session cookie first-party.
-6. Terminate TLS at the proxy. In production the cookie is `Secure`, and the server trusts one proxy hop for client IP addresses.
+### Deployment considerations
 
-Suggested CI steps on every push: `npm ci`, `npm run typecheck`, `npm test`, then `npm run test:integration` against a PostgreSQL service container.
+For a production deployment:
 
-**Scaling beyond one server instance:** Socket.io keeps connection state in memory. Add the Redis adapter and move the in-process event bus to Redis pub/sub so events reach sockets on every instance. Everything else is already stateless.
+- Use a managed or properly secured PostgreSQL instance.
+- Configure a strong JWT secret through your deployment platform's secret-management system.
+- Set the correct frontend origin for CORS and Socket.IO.
+- Configure the frontend and backend to use the intended production origins.
+- Serve the frontend build using a static web server or hosting platform.
+- Route `/api` requests to the backend.
+- Route `/socket.io` requests to the backend and support WebSocket connections.
+- Use HTTPS in production.
+- Configure database backups, logging, and application monitoring.
+- Review authentication, authorization, token expiration, and refresh-token handling before deployment.
 
-## Design decisions and next steps
-
-- **Commands inside transactions, events after commit.** Prevents audit entries that disagree with data and "ghost" real-time updates.
-- **Rules in the database too.** Application code can be bypassed (scripts, a second service, a bad deploy). Triggers and constraints cannot.
-- **Pure domain logic.** The state machine, routing and SLA code import no database or framework, so they are fast to test and easy to change.
-- **Server-sent truth with a query cache.** The client keeps server data in TanStack Query and invalidates it when a real-time event arrives, instead of duplicating state.
-- **No ORM for reporting.** Averages, per-day series and per-agent results are plain SQL with explicit casts; Prisma handles everything transactional.
-
-Natural next steps: email notifications through an adapter behind a `Notifier` interface, file attachments (object storage with signed URLs), business-hours-aware SLA clocks with pause-while-waiting, a knowledge base with suggested articles, and saved queue views.
+When deploying the frontend and backend on the same origin, configure the reverse proxy to forward API and Socket.IO traffic to the backend while serving the frontend assets.
 
 ## Troubleshooting
 
-| Symptom | Fix |
-| --- | --- |
-| `Invalid environment configuration` on start | A required variable in `server/.env` is missing or invalid; the message names it. `JWT_SECRET` needs 32+ characters |
-| `Cannot find module '../generated/prisma/client'` | Run `npm run db:generate` |
-| `Ticket state machine is out of sync with the database` | Migrations are missing or old: run `npm run db:migrate` |
-| `ECONNREFUSED` to port 5432 | PostgreSQL is not running: `docker compose up -d` and wait for *healthy* |
-| Port 5432, 4000 or 5173 already in use | Stop the other process, or change the port (`docker-compose.yml`, `PORT`, Vite `server.port`) |
-| Signed out immediately in production | The cookie is `Secure`; serve over HTTPS and keep the web app and API on the same origin |
-| Integration tests are skipped | Set `DATABASE_URL_TEST` (see [Testing](#testing)) |
+### PostgreSQL connection errors
+
+- Confirm that Docker Compose started the database successfully.
+- Verify `DATABASE_URL` in `server/.env`.
+- Check that the database credentials and port match the running PostgreSQL instance.
+- Confirm that migrations have been applied.
+
+### Frontend cannot reach the backend
+
+- Confirm that the backend is running on the configured port.
+- Verify `API_PROXY_TARGET` and `VITE_API_URL`.
+- Check the browser console and network requests.
+- Ensure CORS and Socket.IO allow the configured frontend origin when cross-origin requests are used.
+
+### Real-time updates are not working
+
+- Confirm that the Socket.IO client connects successfully.
+- Verify the backend Socket.IO configuration and allowed origin.
+- Check that both users belong to the relevant workspace and have the required permissions.
+- Inspect browser and server logs for connection or authorization errors.
+
+### VS Code reports TypeScript errors
+
+1. Install dependencies in both `server/` and `client/`.
+2. Open the repository root in VS Code.
+3. Open the Command Palette.
+4. Select **TypeScript: Select TypeScript Version**.
+5. Choose **Use Workspace Version**.
+6. If stale errors remain, run **Developer: Reload Window**.
+
+Missing dependencies can cause imports to appear unresolved even when the source code is correct.
+
+## Project Notes
+
+- `AUDIT.md` documents cross-layer considerations involving API contracts, real-time communication, error handling, and middleware.
+- The application uses separate frontend and backend packages.
+- The project is designed for local development with PostgreSQL and can be configured for production deployment.
+
+## Contributing
+
+Contributions and improvements are welcome.
+
+1. Fork the repository.
+2. Create a feature branch.
+3. Implement your changes.
+4. Run the relevant type checks, linting, and tests.
+5. Submit a pull request describing the changes.
 
 ## License
 
-MIT
+No license has been specified yet. Add a `LICENSE` file and update this section before distributing the project if you intend to make it open source.
